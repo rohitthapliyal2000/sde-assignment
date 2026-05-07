@@ -1,114 +1,184 @@
-"""
-Tests for the current post-call processing system.
-
-These tests document the EXISTING behaviour — including its problems.
-Your solution should make these tests obsolete and replace them with
-tests that validate the new architecture.
-"""
+from dataclasses import asdict
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from unittest.mock import AsyncMock, patch, MagicMock
-from datetime import datetime
 
-from src.services.post_call_processor import PostCallProcessor, PostCallContext
+from src.services.recording import RecordingStatus
+from src.services.recording_state import RecordingState
+from src.tasks import celery_tasks
+
+
+class InMemoryRecordingStateStore:
+    def __init__(self):
+        self._states = {}
+
+    async def init_pending(self, interaction_id: str, payload: dict):
+        state = RecordingState(
+            interaction_id=interaction_id,
+            status=RecordingStatus.PENDING.value,
+            attempts=0,
+            started_at=1.0,
+            updated_at=1.0,
+            payload=payload,
+        )
+        self._states[interaction_id] = state
+        return state
+
+    async def get(self, interaction_id: str):
+        return self._states.get(interaction_id)
+
+    async def update(
+        self,
+        interaction_id: str,
+        status: RecordingStatus,
+        attempts=None,
+        next_retry_at=None,
+        last_error=None,
+        recording_s3_key=None,
+    ):
+        state = self._states[interaction_id]
+        state.status = status.value
+        if attempts is not None:
+            state.attempts = attempts
+        state.next_retry_at = next_retry_at
+        state.last_error = last_error
+        if recording_s3_key:
+            state.recording_s3_key = recording_s3_key
+        self._states[interaction_id] = state
+        return state
+
+
+def _payload(interaction_id: str = "i-1") -> dict:
+    return {
+        "interaction_id": interaction_id,
+        "session_id": "s-1",
+        "lead_id": "l-1",
+        "campaign_id": "c-1",
+        "customer_id": "cust-1",
+        "agent_id": "a-1",
+        "call_sid": "call-1",
+        "transcript_text": "agent: hi\ncustomer: hello",
+        "conversation_data": {"transcript": []},
+        "additional_data": {},
+        "ended_at": "2026-01-01T00:00:00",
+        "exotel_account_id": "exotel-1",
+    }
 
 
 @pytest.mark.asyncio
-async def test_every_call_gets_full_llm_analysis(make_post_call_context):
-    """
-    CURRENT BEHAVIOUR: Even a clear "not interested" call gets full LLM analysis.
-    This is the core inefficiency — there is no triage step.
-    """
-    ctx = make_post_call_context("not_interested")
-    processor = PostCallProcessor()
-
-    with patch.object(processor, "_call_llm", new_callable=AsyncMock) as mock_llm:
-        mock_llm.return_value = {
-            "call_stage": "not_interested",
-            "entities": {},
-            "summary": "Customer not interested",
-            "usage": {"total_tokens": 1200},
-        }
-
-        with patch.object(processor, "_update_interaction_metadata", new_callable=AsyncMock):
-            result = await processor.process_post_call(ctx)
-
-        # LLM was called — even though the transcript clearly says "not interested"
-        mock_llm.assert_called_once()
-        assert result.tokens_used == 1200
-
-
-@pytest.mark.asyncio
-async def test_rebook_gets_same_priority_as_not_interested(make_post_call_context):
-    """
-    CURRENT BEHAVIOUR: A high-value rebook confirmation has zero priority
-    over a "not interested" call. Both sit in the same Celery queue.
-    """
-    rebook_ctx = make_post_call_context("rebook_confirmed")
-    not_interested_ctx = make_post_call_context("not_interested")
-
-    # Both would be enqueued to the same "postcall_processing" queue
-    # with no priority differentiation
-    assert True  # Documenting the absence of prioritisation
-
-
-@pytest.mark.asyncio
-async def test_short_transcript_detected():
-    """
-    CURRENT BEHAVIOUR: Short transcripts ARE detected, but only at the
-    FastAPI endpoint level. If the detection fails or the logic changes,
-    short calls still enter the Celery queue.
-    """
-    ctx = PostCallContext(
-        interaction_id="test-001",
-        session_id="test-session",
-        lead_id="test-lead",
-        campaign_id="test-campaign",
-        customer_id="test-customer",
-        agent_id="test-agent",
-        call_sid="test-call",
-        transcript_text="agent: Hello\ncustomer: Wrong number",
-        conversation_data={"transcript": [
-            {"role": "agent", "content": "Hello"},
-            {"role": "customer", "content": "Wrong number"},
-        ]},
-        additional_data={},
-        ended_at=datetime.utcnow(),
+async def test_recording_delayed_availability_enqueues_analysis_after_available(monkeypatch):
+    store = InMemoryRecordingStateStore()
+    monkeypatch.setattr(celery_tasks, "recording_state_store", store)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_BACKOFF_BASE_SECONDS", 2)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_BACKOFF_MAX_SECONDS", 20)
+    monkeypatch.setattr(
+        celery_tasks,
+        "fetch_and_upload_recording_once",
+        AsyncMock(side_effect=[None, "recordings/i-1.mp3"]),
+    )
+    monkeypatch.setattr(celery_tasks.metrics_tracker, "track_recording_retry", AsyncMock())
+    monkeypatch.setattr(
+        celery_tasks.metrics_tracker, "track_recording_terminal_state", AsyncMock()
     )
 
-    # Short transcript detection exists but is fragile
-    transcript = ctx.conversation_data.get("transcript", [])
-    is_short = len(transcript) < 4
-    assert is_short is True
+    schedule_retry = MagicMock()
+    enqueue_analysis = MagicMock()
+    monkeypatch.setattr(
+        celery_tasks.orchestrate_postcall_pipeline_task, "apply_async", schedule_retry
+    )
+    monkeypatch.setattr(
+        celery_tasks.run_postcall_analysis_task,
+        "apply_async",
+        enqueue_analysis,
+    )
+
+    payload = _payload("i-1")
+    await celery_tasks._retrieve_recording(payload)
+    state_after_first = await store.get("i-1")
+    assert state_after_first.status == RecordingStatus.RETRYING.value
+    assert state_after_first.attempts == 1
+    assert schedule_retry.call_count == 1
+    enqueue_analysis.assert_not_called()
+
+    await celery_tasks._retrieve_recording(payload)
+    state_after_second = await store.get("i-1")
+    assert state_after_second.status == RecordingStatus.AVAILABLE.value
+    assert state_after_second.attempts == 2
+    assert state_after_second.recording_s3_key == "recordings/i-1.mp3"
+    enqueue_analysis.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_recording_blocks_processing(make_post_call_context):
-    """
-    CURRENT BEHAVIOUR: Recording upload blocks for 45 seconds before
-    LLM analysis can start, even if the recording is available immediately
-    or won't be available at all.
-    """
-    # The asyncio.sleep(45) in recording.py means every call waits 45s
-    # before any LLM analysis begins, regardless of recording availability.
-    # This test documents the coupling — recording should not block analysis.
-    assert True  # Documenting the 45s blocking sleep
+async def test_recording_permanent_timeout_reaches_terminal_state(monkeypatch):
+    store = InMemoryRecordingStateStore()
+    monkeypatch.setattr(celery_tasks, "recording_state_store", store)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_MAX_ATTEMPTS", 2)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_BACKOFF_BASE_SECONDS", 1)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_BACKOFF_MAX_SECONDS", 10)
+    monkeypatch.setattr(
+        celery_tasks, "fetch_and_upload_recording_once", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(celery_tasks.metrics_tracker, "track_recording_retry", AsyncMock())
+    monkeypatch.setattr(
+        celery_tasks.metrics_tracker, "track_recording_terminal_state", AsyncMock()
+    )
+
+    schedule_retry = MagicMock()
+    enqueue_analysis = MagicMock()
+    monkeypatch.setattr(
+        celery_tasks.orchestrate_postcall_pipeline_task, "apply_async", schedule_retry
+    )
+    monkeypatch.setattr(
+        celery_tasks.run_postcall_analysis_task,
+        "apply_async",
+        enqueue_analysis,
+    )
+
+    payload = _payload("i-timeout")
+    await celery_tasks._retrieve_recording(payload)
+    await celery_tasks._retrieve_recording(payload)
+    final_state = await store.get("i-timeout")
+    assert final_state.status == RecordingStatus.TIMEOUT.value
+    assert final_state.attempts == 2
+    assert schedule_retry.call_count == 1
+    enqueue_analysis.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_circuit_breaker_freezes_dialler():
-    """
-    CURRENT BEHAVIOUR: When post-call LLM usage >= 90%, the circuit breaker
-    freezes ALL outbound dialling for the agent for 1800 seconds.
-    No gradual backpressure, no per-campaign granularity.
-    """
-    from src.services.circuit_breaker import PostCallCircuitBreaker
+async def test_worker_restart_recovery_uses_persisted_attempts(monkeypatch):
+    store = InMemoryRecordingStateStore()
+    persisted = RecordingState(
+        interaction_id="i-restart",
+        status=RecordingStatus.RETRYING.value,
+        attempts=2,
+        started_at=1.0,
+        updated_at=2.0,
+        next_retry_at=3.0,
+        last_error="recording_not_ready",
+        payload=_payload("i-restart"),
+    )
+    store._states["i-restart"] = RecordingState(**asdict(persisted))
 
-    breaker = PostCallCircuitBreaker()
-    breaker._capacity_threshold = 0.90
-    breaker._freeze_seconds = 1800
+    monkeypatch.setattr(celery_tasks, "recording_state_store", store)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_MAX_ATTEMPTS", 4)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_BACKOFF_BASE_SECONDS", 2)
+    monkeypatch.setattr(celery_tasks.settings, "RECORDING_BACKOFF_MAX_SECONDS", 20)
+    monkeypatch.setattr(
+        celery_tasks, "fetch_and_upload_recording_once", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(celery_tasks.metrics_tracker, "track_recording_retry", AsyncMock())
+    monkeypatch.setattr(
+        celery_tasks.metrics_tracker, "track_recording_terminal_state", AsyncMock()
+    )
 
-    # If we could mock Redis to return RPM at 91% of max,
-    # the breaker would trip and freeze ALL calls for that agent
-    assert breaker._freeze_seconds == 1800
-    assert breaker._capacity_threshold == 0.90
+    schedule_retry = MagicMock()
+    monkeypatch.setattr(
+        celery_tasks.orchestrate_postcall_pipeline_task, "apply_async", schedule_retry
+    )
+
+    await celery_tasks._retrieve_recording(_payload("i-restart"))
+    recovered_state = await store.get("i-restart")
+    assert recovered_state.attempts == 3
+    assert recovered_state.status == RecordingStatus.RETRYING.value
+    assert schedule_retry.call_count == 1

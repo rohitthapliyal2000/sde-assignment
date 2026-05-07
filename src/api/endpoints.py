@@ -32,11 +32,11 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.services.signal_jobs import trigger_signal_jobs, update_lead_stage
-from src.tasks.celery_tasks import process_interaction_end_background_task
+from src.tasks.celery_tasks import orchestrate_postcall_pipeline_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,7 +66,6 @@ async def end_interaction(
     session_id: UUID,
     interaction_id: UUID,
     request: InteractionEndRequest,
-    background_tasks: BackgroundTasks,
 ):
     """
     End an interaction and trigger post-call processing.
@@ -149,7 +148,7 @@ async def end_interaction(
                 "exotel_account_id": interaction.get("exotel_account_id"),
             }
 
-            task = process_interaction_end_background_task.apply_async(
+            task = orchestrate_postcall_pipeline_task.apply_async(
                 args=[celery_payload],
                 queue="postcall_processing",  # One queue to rule them all
             )
@@ -162,26 +161,6 @@ async def end_interaction(
                     # Notice what's NOT logged here: no queue depth, no estimated
                     # wait time, no indication of how backed up we are.
                 },
-            )
-
-            # These fire immediately — before Celery has done anything.
-            # analysis_result={} means downstream gets an empty analysis.
-            # This was supposed to be a "best effort early trigger" but it
-            # mostly just sends empty payloads to signal_jobs.
-            asyncio.create_task(
-                trigger_signal_jobs(
-                    interaction_id=str(interaction_id),
-                    session_id=str(session_id),
-                    campaign_id=interaction["campaign_id"],
-                    analysis_result={},  # ← Celery hasn't run yet. This is empty.
-                )
-            )
-            asyncio.create_task(
-                update_lead_stage(
-                    lead_id=interaction["lead_id"],
-                    interaction_id=str(interaction_id),
-                    call_stage="processing",  # ← Placeholder, not a real outcome
-                )
             )
 
         return InteractionEndResponse(

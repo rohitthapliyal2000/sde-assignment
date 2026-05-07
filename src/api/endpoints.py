@@ -36,7 +36,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from src.services.signal_jobs import trigger_signal_jobs, update_lead_stage
-from src.tasks.celery_tasks import orchestrate_postcall_pipeline_task
+from src.tasks.celery_tasks import (
+    drain_due_workflow_jobs_task,
+    enqueue_postcall_workflow_job,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -148,16 +151,15 @@ async def end_interaction(
                 "exotel_account_id": interaction.get("exotel_account_id"),
             }
 
-            task = orchestrate_postcall_pipeline_task.apply_async(
-                args=[celery_payload],
-                queue="postcall_processing",  # One queue to rule them all
-            )
+            job_id = await enqueue_postcall_workflow_job(celery_payload)
+            task = drain_due_workflow_jobs_task.apply_async(queue="postcall_processing")
 
             logger.info(
                 "postcall_enqueued",
                 extra={
                     "interaction_id": str(interaction_id),
                     "celery_task_id": task.id,
+                    "workflow_job_id": job_id,
                     # Notice what's NOT logged here: no queue depth, no estimated
                     # wait time, no indication of how backed up we are.
                 },

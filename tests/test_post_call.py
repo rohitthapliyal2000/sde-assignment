@@ -1,5 +1,5 @@
 from dataclasses import asdict
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -82,31 +82,20 @@ async def test_recording_delayed_availability_enqueues_analysis_after_available(
         celery_tasks.metrics_tracker, "track_recording_terminal_state", AsyncMock()
     )
 
-    schedule_retry = MagicMock()
-    enqueue_analysis = MagicMock()
-    monkeypatch.setattr(
-        celery_tasks.orchestrate_postcall_pipeline_task, "apply_async", schedule_retry
-    )
-    monkeypatch.setattr(
-        celery_tasks.run_postcall_analysis_task,
-        "apply_async",
-        enqueue_analysis,
-    )
-
     payload = _payload("i-1")
-    await celery_tasks._retrieve_recording(payload)
+    first = await celery_tasks._retrieve_recording(payload)
     state_after_first = await store.get("i-1")
     assert state_after_first.status == RecordingStatus.RETRYING.value
     assert state_after_first.attempts == 1
-    assert schedule_retry.call_count == 1
-    enqueue_analysis.assert_not_called()
+    assert first["state"] == RecordingStatus.RETRYING.value
+    assert first["retry_delay_seconds"] > 0
 
-    await celery_tasks._retrieve_recording(payload)
+    second = await celery_tasks._retrieve_recording(payload)
     state_after_second = await store.get("i-1")
     assert state_after_second.status == RecordingStatus.AVAILABLE.value
     assert state_after_second.attempts == 2
     assert state_after_second.recording_s3_key == "recordings/i-1.mp3"
-    enqueue_analysis.assert_called_once()
+    assert second["state"] == RecordingStatus.AVAILABLE.value
 
 
 @pytest.mark.asyncio
@@ -124,25 +113,14 @@ async def test_recording_permanent_timeout_reaches_terminal_state(monkeypatch):
         celery_tasks.metrics_tracker, "track_recording_terminal_state", AsyncMock()
     )
 
-    schedule_retry = MagicMock()
-    enqueue_analysis = MagicMock()
-    monkeypatch.setattr(
-        celery_tasks.orchestrate_postcall_pipeline_task, "apply_async", schedule_retry
-    )
-    monkeypatch.setattr(
-        celery_tasks.run_postcall_analysis_task,
-        "apply_async",
-        enqueue_analysis,
-    )
-
     payload = _payload("i-timeout")
-    await celery_tasks._retrieve_recording(payload)
-    await celery_tasks._retrieve_recording(payload)
+    first = await celery_tasks._retrieve_recording(payload)
+    second = await celery_tasks._retrieve_recording(payload)
     final_state = await store.get("i-timeout")
     assert final_state.status == RecordingStatus.TIMEOUT.value
     assert final_state.attempts == 2
-    assert schedule_retry.call_count == 1
-    enqueue_analysis.assert_not_called()
+    assert first["state"] == RecordingStatus.RETRYING.value
+    assert second["state"] == RecordingStatus.TIMEOUT.value
 
 
 @pytest.mark.asyncio
@@ -172,13 +150,8 @@ async def test_worker_restart_recovery_uses_persisted_attempts(monkeypatch):
         celery_tasks.metrics_tracker, "track_recording_terminal_state", AsyncMock()
     )
 
-    schedule_retry = MagicMock()
-    monkeypatch.setattr(
-        celery_tasks.orchestrate_postcall_pipeline_task, "apply_async", schedule_retry
-    )
-
-    await celery_tasks._retrieve_recording(_payload("i-restart"))
+    result = await celery_tasks._retrieve_recording(_payload("i-restart"))
     recovered_state = await store.get("i-restart")
     assert recovered_state.attempts == 3
     assert recovered_state.status == RecordingStatus.RETRYING.value
-    assert schedule_retry.call_count == 1
+    assert result["state"] == RecordingStatus.RETRYING.value

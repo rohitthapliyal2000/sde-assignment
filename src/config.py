@@ -35,10 +35,13 @@ class Settings:
     LLM_AVG_TOKENS_PER_CALL: int = int(os.getenv("LLM_AVG_TOKENS_PER_CALL", "1500"))
 
     # ── Recording ─────────────────────────────────────────────────────────────
-    # Why 45 seconds? Someone measured the average Exotel delivery time once,
-    # added a buffer, and hardcoded it. That was on a quiet Friday afternoon.
-    # Under load the delivery window is 10s–120s with no guarantee.
-    RECORDING_WAIT_SECONDS: int = 45
+    RECORDING_MAX_ATTEMPTS: int = int(os.getenv("RECORDING_MAX_ATTEMPTS", "6"))
+    RECORDING_BACKOFF_BASE_SECONDS: int = int(
+        os.getenv("RECORDING_BACKOFF_BASE_SECONDS", "5")
+    )
+    RECORDING_BACKOFF_MAX_SECONDS: int = int(
+        os.getenv("RECORDING_BACKOFF_MAX_SECONDS", "120")
+    )
     S3_BUCKET: str = os.getenv("S3_BUCKET", "voicebot-recordings")
 
     # ── Circuit breaker ───────────────────────────────────────────────────────

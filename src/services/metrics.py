@@ -88,5 +88,37 @@ class PostCallMetricsTracker:
             },
         )
 
+    async def track_recording_retry(
+        self,
+        interaction_id: str,
+        attempt: int,
+        next_retry_in_seconds: int,
+    ) -> None:
+        logger.info(
+            "recording_retry_scheduled",
+            extra={
+                "interaction_id": interaction_id,
+                "attempt": attempt,
+                "next_retry_in_seconds": next_retry_in_seconds,
+            },
+        )
+
+    async def track_recording_terminal_state(
+        self,
+        interaction_id: str,
+        status: str,
+        attempts: int,
+        error: str | None = None,
+    ) -> None:
+        logger.info(
+            "recording_terminal_state",
+            extra={
+                "interaction_id": interaction_id,
+                "status": status,
+                "attempts": attempts,
+                "error": error,
+            },
+        )
+
 
 metrics_tracker = PostCallMetricsTracker()

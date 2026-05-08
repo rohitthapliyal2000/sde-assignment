@@ -69,5 +69,21 @@ class Settings:
     )
     WORKFLOW_RETRY_MAX_SECONDS: int = int(os.getenv("WORKFLOW_RETRY_MAX_SECONDS", "300"))
 
+    # ── Graded backpressure / throttling ──────────────────────────────────────
+    THROTTLE_SOFT_UTILIZATION: float = float(os.getenv("THROTTLE_SOFT_UTILIZATION", "0.70"))
+    THROTTLE_HARD_UTILIZATION: float = float(os.getenv("THROTTLE_HARD_UTILIZATION", "1.00"))
+    THROTTLE_QUEUE_SOFT_LIMIT: int = int(os.getenv("THROTTLE_QUEUE_SOFT_LIMIT", "5000"))
+    THROTTLE_RETRY_SOFT_LIMIT: int = int(os.getenv("THROTTLE_RETRY_SOFT_LIMIT", "1000"))
+    THROTTLE_MAX_DELAY_SECONDS: int = int(os.getenv("THROTTLE_MAX_DELAY_SECONDS", "20"))
+    THROTTLE_HIGH_PRIORITY_MIN: int = int(os.getenv("THROTTLE_HIGH_PRIORITY_MIN", "200"))
+
+    # Catastrophic dependency failure breaker (short-lived)
+    THROTTLE_OUTAGE_ERROR_THRESHOLD: int = int(
+        os.getenv("THROTTLE_OUTAGE_ERROR_THRESHOLD", "30")
+    )
+    THROTTLE_OUTAGE_FREEZE_SECONDS: int = int(
+        os.getenv("THROTTLE_OUTAGE_FREEZE_SECONDS", "30")
+    )
+
 
 settings = Settings()

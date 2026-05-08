@@ -68,6 +68,12 @@ class PostCallMetricsTracker:
             },
         )
 
+        # Sliding-window utilization counters for throttling (60s TTL).
+        # These are approximate and are meant for adaptive backpressure, not billing.
+        if tokens_used:
+            await redis_client.incrby("llm:postcall:tpm", int(tokens_used))
+            await redis_client.expire("llm:postcall:tpm", 60)
+
     async def track_processing_failed(
         self, interaction_id: str, error: str
     ) -> None:
@@ -119,6 +125,9 @@ class PostCallMetricsTracker:
                 "error": error,
             },
         )
+
+    async def track_throttle_decision(self, payload: dict) -> None:
+        logger.info("throttle_decision", extra=payload)
 
 
 metrics_tracker = PostCallMetricsTracker()

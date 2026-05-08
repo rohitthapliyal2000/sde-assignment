@@ -29,6 +29,11 @@ from dataclasses import dataclass
 
 from src.config import settings
 from src.services.circuit_breaker import circuit_breaker
+from src.services.rate_limiter import (
+    DeferredDueToRateLimit,
+    ProviderRateLimitError,
+    rate_limiter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,10 +96,19 @@ class PostCallProcessor:
           - Consider whether this call's outcome even warrants full analysis
         """
 
-        # Tells the circuit breaker an LLM request is in flight.
-        # Note: this increments llm:postcall:rpm but doesn't check it first.
-        # The check happens in circuit_breaker.check_capacity(), which is
-        # called by the dialler — not here, before spending the tokens.
+        # Reserve capacity before firing the request (RPM + TPM, global + per-customer).
+        reservation = await rate_limiter.reserve(
+            customer_id=str(ctx.customer_id),
+            requests=1,
+            tokens=settings.LLM_AVG_TOKENS_PER_CALL,
+        )
+        if not reservation.allowed:
+            raise DeferredDueToRateLimit(
+                retry_after_seconds=reservation.retry_after_seconds,
+                reason="llm_capacity_unavailable",
+            )
+
+        # Approximate in-flight RPM for throttling visibility.
         await circuit_breaker.record_postcall_start()
 
         try:
@@ -132,6 +146,10 @@ class PostCallProcessor:
             return result
 
         except Exception as e:
+            # Provider-side errors can enable short-lived outage mode.
+            msg = str(e).lower()
+            if "429" in msg or "rate limit" in msg:
+                await circuit_breaker.record_provider_error("429")
             logger.exception(
                 "postcall_analysis_failed",
                 extra={

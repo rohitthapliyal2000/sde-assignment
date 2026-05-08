@@ -19,6 +19,7 @@ from src.services.recording import (
 from src.services.recording_state import recording_state_store
 from src.services.signal_jobs import trigger_signal_jobs, update_lead_stage
 from src.services.retry_queue import retry_queue
+from src.services.rate_limiter import DeferredDueToRateLimit, ProviderRateLimitError
 from src.utils.db import async_session_factory
 from sqlalchemy import text
 from src.utils.redis_client import redis_client
@@ -400,9 +401,26 @@ async def _execute_claimed_job(job) -> None:
             return
 
         if job.job_type == JobType.POSTCALL_ANALYSIS:
-            await _process_interaction_analysis(None, payload)
-            await job_service.mark_job_completed(job_id=job.id)
-            return
+            try:
+                await _process_interaction_analysis(None, payload)
+                await job_service.mark_job_completed(job_id=job.id)
+                return
+            except DeferredDueToRateLimit as exc:
+                await job_service.reschedule_job(
+                    job_id=job.id,
+                    next_run_at=datetime.now(timezone.utc)
+                    + timedelta(seconds=int(exc.retry_after_seconds)),
+                    error=exc.reason,
+                )
+                return
+            except ProviderRateLimitError as exc:
+                await job_service.reschedule_job(
+                    job_id=job.id,
+                    next_run_at=datetime.now(timezone.utc)
+                    + timedelta(seconds=int(exc.retry_after_seconds)),
+                    error="provider_retry_after",
+                )
+                return
 
         await job_service.mark_job_failed(
             job_id=job.id,

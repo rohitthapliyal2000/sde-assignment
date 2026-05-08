@@ -85,5 +85,15 @@ class Settings:
         os.getenv("THROTTLE_OUTAGE_FREEZE_SECONDS", "30")
     )
 
+    # ── LLM limiter (reservation) ─────────────────────────────────────────────
+    # These caps prevent a single customer from starving others.
+    # Set to 0 to disable per-customer caps (only global caps apply).
+    LLM_PER_CUSTOMER_REQUESTS_PER_MINUTE: int = int(
+        os.getenv("LLM_PER_CUSTOMER_REQUESTS_PER_MINUTE", "0")
+    )
+    LLM_PER_CUSTOMER_TOKENS_PER_MINUTE: int = int(
+        os.getenv("LLM_PER_CUSTOMER_TOKENS_PER_MINUTE", "0")
+    )
+
 
 settings = Settings()

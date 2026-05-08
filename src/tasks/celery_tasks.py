@@ -20,6 +20,8 @@ from src.services.recording_state import recording_state_store
 from src.services.signal_jobs import trigger_signal_jobs, update_lead_stage
 from src.services.retry_queue import retry_queue
 from src.utils.db import async_session_factory
+from sqlalchemy import text
+from src.utils.redis_client import redis_client
 
 logger = logging.getLogger(__name__)
 job_service = JobService(
@@ -338,6 +340,22 @@ async def _drain_due_jobs() -> None:
         worker_id=worker_id,
         limit=settings.WORKFLOW_CLAIM_BATCH_SIZE,
     )
+    # Best-effort queue visibility for throttling (DB is source of truth).
+    try:
+        async with async_session_factory() as session:
+            pending = await session.execute(
+                text(
+                    "SELECT count(*) FROM workflow_jobs WHERE status IN ('PENDING','RETRY')"
+                )
+            )
+            retry = await session.execute(
+                text("SELECT count(*) FROM workflow_jobs WHERE status = 'RETRY'")
+            )
+            await redis_client.set("workflow:queue_depth", int(pending.scalar_one()), ex=30)
+            await redis_client.set("workflow:retry_depth", int(retry.scalar_one()), ex=30)
+    except Exception:
+        # Visibility should never break processing.
+        pass
     for job in claimed:
         await _execute_claimed_job(job)
 

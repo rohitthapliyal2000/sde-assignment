@@ -18,4 +18,14 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_default_queue=settings.POSTCALL_CELERY_QUEUE,
+    beat_schedule={
+        "drain-due-workflow-jobs": {
+            "task": "drain_due_workflow_jobs_task",
+            "schedule": 15.0,
+        },
+        "recover-stale-workflow-jobs": {
+            "task": "recover_stale_workflow_jobs_task",
+            "schedule": 60.0,
+        },
+    },
 )

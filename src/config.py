@@ -60,6 +60,14 @@ class Settings:
     POSTCALL_CELERY_QUEUE: str = "postcall_processing"
     POSTCALL_MAX_RETRIES: int = 3
     POSTCALL_RETRY_DELAY: int = 60  # Fixed delay — not exponential backoff
+    WORKFLOW_CLAIM_BATCH_SIZE: int = int(os.getenv("WORKFLOW_CLAIM_BATCH_SIZE", "20"))
+    WORKFLOW_LOCK_TIMEOUT_SECONDS: int = int(
+        os.getenv("WORKFLOW_LOCK_TIMEOUT_SECONDS", "300")
+    )
+    WORKFLOW_RETRY_BASE_SECONDS: int = int(
+        os.getenv("WORKFLOW_RETRY_BASE_SECONDS", "10")
+    )
+    WORKFLOW_RETRY_MAX_SECONDS: int = int(os.getenv("WORKFLOW_RETRY_MAX_SECONDS", "300"))
 
 
 settings = Settings()
